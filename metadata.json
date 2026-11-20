@@ -1,0 +1,8 @@
+{
+  "name": "Las aventuras de Teo&Benja",
+  "description": "Teo y Benja se aventuran a explorar este mágico mundo. Recolecta todos los ítems y esquiva los enemigos para completar la mayor cantidad posible de puntos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
