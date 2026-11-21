@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Pause, Play, RotateCcw, Scissors, Volume2, VolumeX } from 'lucide-react';
+import { Check, Pause, Play, RotateCcw, Volume2, VolumeX } from 'lucide-react';
 import { GameDifficulty, GameState, SpriteAsset, SpriteSlotId } from '../types/game';
 import { loadImageElement } from '../utils/imageProcessing';
 import { soundFx } from '../utils/soundFx';
@@ -13,12 +13,10 @@ interface RunnerGameCanvasProps {
   difficulty: GameDifficulty;
   highScore: number;
   muted: boolean;
-  onChangeTitle: (title: string) => void;
   onChangeActiveHero: (hero: '1' | '2') => void;
   onChangeDifficulty: (diff: GameDifficulty) => void;
   onToggleMute: () => void;
   onUpdateHighScore: (score: number) => void;
-  onOpenStudio: () => void;
 }
 
 interface ObstacleEntity {
@@ -124,10 +122,11 @@ const DIFFICULTY_CONFIG: Record<
   },
 };
 
-const CANVAS_W = 960;
-const CANVAS_H = 480;
-const GROUND_H = 84;
-const GROUND_Y = CANVAS_H - GROUND_H;
+const BASE_WORLD_W = 960;
+const BASE_WORLD_H = 480;
+const MIN_WORLD_W = 540;
+const BASE_GROUND_H = 84;
+const DEFAULT_GROUND_Y = BASE_WORLD_H - BASE_GROUND_H;
 
 const GROUND_OBSTACLE_SLOTS: SpriteSlotId[] = [
   'obstacle_ground_1',
@@ -171,12 +170,10 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
   difficulty,
   highScore,
   muted,
-  onChangeTitle,
   onChangeActiveHero,
   onChangeDifficulty,
   onToggleMute,
   onUpdateHighScore,
-  onOpenStudio,
 }) => {
   const [gameState, setGameState] = useState<GameState>('TITLE_MENU');
   const [hudScore, setHudScore] = useState(0);
@@ -194,6 +191,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
     return () => window.clearInterval(id);
   }, [gameState]);
 
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const loadedImagesRef = useRef<Partial<Record<SpriteSlotId, HTMLImageElement>>>({});
   const spritesRef = useRef(sprites);
@@ -202,6 +200,16 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
   activeHeroRef.current = activeHero;
   const stateRef = useRef<GameState>('TITLE_MENU');
   stateRef.current = gameState;
+
+  const worldSizeRef = useRef({
+    worldW: BASE_WORLD_W,
+    worldH: BASE_WORLD_H,
+    groundH: BASE_GROUND_H,
+    groundY: DEFAULT_GROUND_Y,
+    heroX: 110,
+    scale: 1,
+    dpr: 1,
+  });
 
   const worldRef = useRef({
     speed: DIFFICULTY_CONFIG[difficulty].baseSpeed,
@@ -218,7 +226,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
     runFrame: 0,
     hero2WalkPhase: 0,
     hero2TrailY: [] as number[],
-    heroY: GROUND_Y - 90,
+    heroY: DEFAULT_GROUND_Y - 90,
     heroVy: 0,
     jumpsUsed: 0,
     jumpBufferTimer: 0,
@@ -237,6 +245,72 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
       { x: 820, y: 52, scale: 1.0, speedFactor: 0.22 },
     ] as SkyEntity[],
   });
+
+  // Dynamically size logical world & HiDPI canvas to fit the game stage without stretching or scrolling
+  useEffect(() => {
+    const stage = stageRef.current;
+    const canvas = canvasRef.current;
+    if (!stage || !canvas) return;
+
+    const updateSize = () => {
+      const rect = stage.getBoundingClientRect();
+      const stageW = Math.max(240, Math.round(rect.width));
+      const stageH = Math.max(180, Math.round(rect.height));
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+      const aspect = stageW / stageH;
+      let worldW: number;
+      let worldH: number;
+      if (aspect >= MIN_WORLD_W / BASE_WORLD_H) {
+        worldH = BASE_WORLD_H;
+        worldW = Math.max(MIN_WORLD_W, Math.round(BASE_WORLD_H * aspect));
+      } else {
+        worldW = MIN_WORLD_W;
+        worldH = Math.max(BASE_WORLD_H, Math.round(MIN_WORLD_W / aspect));
+      }
+
+      const groundH = Math.round(Math.max(BASE_GROUND_H, worldH * 0.16));
+      const groundY = worldH - groundH;
+      const heroX = worldW < 640 ? 64 : 110;
+      const scale = stageW / worldW;
+
+      const oldGroundY = worldSizeRef.current.groundY;
+      const deltaGround = groundY - oldGroundY;
+
+      worldSizeRef.current = {
+        worldW,
+        worldH,
+        groundH,
+        groundY,
+        heroX,
+        scale,
+        dpr,
+      };
+
+      canvas.width = Math.round(stageW * dpr);
+      canvas.height = Math.round(stageH * dpr);
+
+      if (deltaGround !== 0) {
+        const w = worldRef.current;
+        if (w.heroY >= oldGroundY - 92) {
+          w.heroY = groundY - 90;
+        } else {
+          w.heroY += deltaGround;
+        }
+        for (const obs of w.obstacles) {
+          obs.y += deltaGround;
+        }
+        for (const col of w.collectibles) {
+          col.y += deltaGround;
+        }
+      }
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, []);
 
   // Sync sound mute state
   useEffect(() => {
@@ -285,7 +359,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
       w.runFrame = 0;
       w.hero2WalkPhase = 0;
       w.hero2TrailY = [];
-      w.heroY = GROUND_Y - 90;
+      w.heroY = worldSizeRef.current.groundY - 90;
       w.heroVy = 0;
       w.jumpsUsed = 0;
       w.jumpBufferTimer = 0;
@@ -337,9 +411,10 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
     if (stateRef.current !== 'PLAYING') return;
 
     const w = worldRef.current;
+    const { groundY, heroX } = worldSizeRef.current;
     const cfg = DIFFICULTY_CONFIG[difficulty];
     const heroH = 90;
-    const onGround = w.heroY >= GROUND_Y - heroH - 2;
+    const onGround = w.heroY >= groundY - heroH - 2;
 
     if (onGround || w.jumpsUsed < 2) {
       const isDouble = !onGround && w.jumpsUsed === 1;
@@ -347,7 +422,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
       w.jumpsUsed = onGround ? 1 : 2;
       w.jumpBufferTimer = 0;
       soundFx.playJump(isDouble);
-      emitDust(135, w.heroY + heroH - 6, isDouble ? '#93C5FD' : '#E2E8F0', 7);
+      emitDust(heroX + 35, w.heroY + heroH - 6, isDouble ? '#93C5FD' : '#E2E8F0', 7);
     } else {
       // Buffer jump slightly before landing so 5-7yo timing feels snappy
       w.jumpBufferTimer = 0.14;
@@ -412,14 +487,16 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
 
       const imgs = loadedImagesRef.current;
       const w = worldRef.current;
+      const { worldW, worldH, groundH, groundY, heroX, scale, dpr } = worldSizeRef.current;
       const cfg = DIFFICULTY_CONFIG[difficulty];
-      const heroX = 110;
       const heroW = 90;
       const heroH = 90;
 
+      ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+
       // Update simulation when PLAYING (and gentle idle scroll on TITLE_MENU)
       if (stateRef.current === 'TITLE_MENU') {
-        w.bgScroll = (w.bgScroll + 36 * dt) % CANVAS_W;
+        w.bgScroll = (w.bgScroll + 36 * dt) % Math.max(worldW, BASE_WORLD_W);
         w.groundScroll = (w.groundScroll + 95 * dt) % 320;
         w.runAnimTimer += dt;
         w.hero2WalkPhase += dt * 10;
@@ -429,7 +506,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
         }
         for (const s of w.skyDecor) {
           s.x -= 45 * s.speedFactor * dt;
-          if (s.x < -160) s.x = CANVAS_W + 100;
+          if (s.x < -160) s.x = worldW + 100;
         }
         for (const d of w.decorItems) {
           d.x -= 60 * d.speedFactor * dt;
@@ -438,19 +515,19 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
       } else if (stateRef.current === 'PLAYING') {
         w.speed = Math.min(cfg.maxSpeed, w.speed + cfg.accel * dt);
         w.distance += w.speed * dt * 0.08;
-        w.bgScroll = (w.bgScroll + w.speed * 0.22 * dt) % CANVAS_W;
+        w.bgScroll = w.bgScroll + w.speed * 0.22 * dt;
 
         const groundImg = imgs.ground;
         const groundTileW = groundImg
-          ? Math.max(80, Math.round((groundImg.naturalWidth / groundImg.naturalHeight) * GROUND_H))
+          ? Math.max(80, Math.round((groundImg.naturalWidth / groundImg.naturalHeight) * groundH))
           : 320;
         w.groundScroll = (w.groundScroll + w.speed * dt) % groundTileW;
 
         for (const s of w.skyDecor) {
           s.x -= w.speed * s.speedFactor * dt;
           if (s.x < -180) {
-            s.x = CANVAS_W + 80 + Math.random() * 140;
-            s.y = 36 + Math.random() * 120;
+            s.x = worldW + 80 + Math.random() * 140;
+            s.y = Math.max(24, groundY * 0.08 + Math.random() * Math.min(140, groundY * 0.35));
           }
         }
 
@@ -468,7 +545,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
             const chosenDecor = decorPool[Math.floor(Math.random() * decorPool.length)];
             const size = 76 + Math.round(Math.random() * 38);
             w.decorItems.push({
-              x: CANVAS_W + 40,
+              x: worldW + 40,
               slotId: chosenDecor,
               w: size,
               h: size,
@@ -492,11 +569,11 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
         // Hero physics
         w.heroVy += cfg.gravity * dt;
         w.heroY += w.heroVy * dt;
-        if (w.heroY >= GROUND_Y - heroH) {
+        if (w.heroY >= groundY - heroH) {
           if (w.heroVy > 220) {
-            emitDust(heroX + heroW * 0.4, GROUND_Y - 4, '#CBD5E1', 4);
+            emitDust(heroX + heroW * 0.4, groundY - 4, '#CBD5E1', 4);
           }
-          w.heroY = GROUND_Y - heroH;
+          w.heroY = groundY - heroH;
           w.heroVy = 0;
           w.jumpsUsed = 0;
 
@@ -505,7 +582,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
             w.jumpsUsed = 1;
             w.jumpBufferTimer = 0;
             soundFx.playJump(false);
-            emitDust(heroX + heroW * 0.4, GROUND_Y - 4, '#E2E8F0', 6);
+            emitDust(heroX + heroW * 0.4, groundY - 4, '#E2E8F0', 6);
           }
         }
 
@@ -538,10 +615,10 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
 
           const obsW = isAir ? 78 : 68;
           const obsH = isAir ? 60 : slotId === 'obstacle_ground_2' ? 74 : 66;
-          const obsY = isAir ? GROUND_Y - 155 : GROUND_Y - obsH;
+          const obsY = isAir ? groundY - 155 : groundY - obsH;
 
           w.obstacles.push({
-            x: CANVAS_W + 40,
+            x: worldW + 40,
             y: obsY,
             w: obsW,
             h: obsH,
@@ -561,8 +638,8 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
             const arcSlot = pickCollectibleSlot();
             for (let i = -1; i <= 1; i++) {
               w.collectibles.push({
-                x: CANVAS_W + 40 + obsW / 2 + i * 44,
-                y: GROUND_Y - obsH - (i === 0 ? 85 : 58),
+                x: worldW + 40 + obsW / 2 + i * 44,
+                y: groundY - obsH - (i === 0 ? 85 : 58),
                 r: 22,
                 kind: 'coin',
                 slotId: arcSlot,
@@ -585,8 +662,8 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
 
           if (w.powerupCooldown <= 0 && (w.lives < w.maxLives || Math.random() > 0.5)) {
             w.collectibles.push({
-              x: CANVAS_W + 60,
-              y: GROUND_Y - 130,
+              x: worldW + 60,
+              y: groundY - 130,
               r: 25,
               kind: 'powerup',
               slotId: 'powerup',
@@ -600,8 +677,8 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
             for (let i = 0; i < count; i++) {
               const slotId = prizePool[Math.floor(Math.random() * prizePool.length)];
               w.collectibles.push({
-                x: CANVAS_W + 40 + i * 46,
-                y: high ? GROUND_Y - 135 : GROUND_Y - 46,
+                x: worldW + 40 + i * 46,
+                y: high ? groundY - 135 : groundY - 46,
                 r: 21,
                 kind: 'coin',
                 slotId,
@@ -732,18 +809,18 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
       }
 
       // --- RENDER SCENE ---
-      ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+      ctx.clearRect(0, 0, worldW, worldH);
 
       // 1. Background parallax
       const bgImg = imgs.background;
       if (bgImg) {
-        const bgW = Math.max(CANVAS_W, Math.round((bgImg.naturalWidth / bgImg.naturalHeight) * CANVAS_H));
+        const bgW = Math.max(worldW, Math.round((bgImg.naturalWidth / bgImg.naturalHeight) * worldH));
         const shift = w.bgScroll % bgW;
-        ctx.drawImage(bgImg, -shift, 0, bgW, CANVAS_H);
-        ctx.drawImage(bgImg, bgW - shift, 0, bgW, CANVAS_H);
+        ctx.drawImage(bgImg, -shift, 0, bgW, worldH);
+        ctx.drawImage(bgImg, bgW - shift, 0, bgW, worldH);
       } else {
         ctx.fillStyle = '#E0F2FE';
-        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+        ctx.fillRect(0, 0, worldW, worldH);
       }
 
       // 2. Sky decor parallax
@@ -760,7 +837,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
         if (dImg) {
           ctx.save();
           ctx.globalAlpha = 0.92;
-          drawSpriteFit(ctx, dImg, d.x, GROUND_Y - d.h + 4, d.w, d.h, true);
+          drawSpriteFit(ctx, dImg, d.x, groundY - d.h + 4, d.w, d.h, true);
           ctx.restore();
         }
       }
@@ -768,16 +845,16 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
       // 3. Repeating infinite ground
       const groundImg = imgs.ground;
       if (groundImg) {
-        const tileW = Math.max(80, Math.round((groundImg.naturalWidth / groundImg.naturalHeight) * GROUND_H));
+        const tileW = Math.max(80, Math.round((groundImg.naturalWidth / groundImg.naturalHeight) * groundH));
         const offset = w.groundScroll % tileW;
-        for (let gx = -offset; gx < CANVAS_W + tileW; gx += tileW) {
-          ctx.drawImage(groundImg, gx, GROUND_Y, tileW + 1, GROUND_H);
+        for (let gx = -offset; gx < worldW + tileW; gx += tileW) {
+          ctx.drawImage(groundImg, gx, groundY, tileW + 1, groundH);
         }
       } else {
         ctx.fillStyle = '#22C55E';
-        ctx.fillRect(0, GROUND_Y, CANVAS_W, 24);
+        ctx.fillRect(0, groundY, worldW, 24);
         ctx.fillStyle = '#B45309';
-        ctx.fillRect(0, GROUND_Y + 24, CANVAS_W, GROUND_H - 24);
+        ctx.fillRect(0, groundY + 24, worldW, groundH - 24);
       }
 
       // 4. Collectibles
@@ -838,7 +915,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
 
       const blinkHide = w.invulnTimer > 0 && Math.floor(w.invulnTimer * 14) % 2 === 0;
       if (!blinkHide) {
-        const onGround = w.heroY >= GROUND_Y - heroH - 2;
+        const onGround = w.heroY >= groundY - heroH - 2;
         const customHero1Frames = HERO1_RUN_SLOTS.filter((id) => spritesRef.current[id]?.isCustom);
         const hero1Frames = customHero1Frames.length > 0 ? customHero1Frames : HERO1_RUN_SLOTS;
         const hero1Slot = hero1Frames[w.runFrame % hero1Frames.length];
@@ -897,7 +974,6 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
     return () => cancelAnimationFrame(rafId);
   }, [difficulty, highScore, onUpdateHighScore]);
 
-  const customCount = Object.values(sprites).filter((s) => s.isCustom).length;
   const cleanHero1 = hero1Name.trim() || 'Héroe 1';
   const cleanHero2 = hero2Name.trim() || 'Héroe 2';
   const activeRunnerLabel = activeHero === '2' ? cleanHero2 : cleanHero1;
@@ -909,26 +985,14 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
   const hero1PreviewSlot = hero1PreviewFrames[titleAnimFrame % hero1PreviewFrames.length];
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+    <div className="mx-auto flex h-full w-full max-w-6xl flex-col px-2.5 py-2 sm:px-6 sm:py-4">
       {/* Top Game Bar */}
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <h1 className="font-hand text-2xl font-normal tracking-normal text-slate-900">{gameTitle}</h1>
-          <span className="text-xs text-slate-500">
-            {customCount > 0 ? `${customCount} dibujos propios activos` : 'Usando dibujos base'}
-          </span>
-        </div>
+      <div className="mb-1.5 flex shrink-0 items-center justify-between gap-2 sm:mb-3">
+        <h1 className="font-hand truncate text-xl font-normal tracking-normal text-slate-900 sm:text-3xl">
+          {gameTitle}
+        </h1>
 
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onOpenStudio}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap"
-          >
-            <Scissors className="h-3.5 w-3.5 text-slate-500" />
-            Cambiar dibujos
-          </button>
-
+        <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
             onClick={onToggleMute}
@@ -942,7 +1006,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
             <button
               type="button"
               onClick={() => setGameState('PAUSED')}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap sm:px-3"
             >
               <Pause className="h-3.5 w-3.5" />
               Pausa
@@ -951,32 +1015,32 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
         </div>
       </div>
 
-      {/* Game Frame */}
-      <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-900 shadow-sm">
+      {/* Game Frame (adapts to viewport height without scrollbars) */}
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-900 shadow-sm sm:rounded-2xl">
         {/* In-game HUD Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/80 bg-white px-4 py-2.5">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-200/80 bg-white px-2.5 py-1.5 sm:gap-4 sm:px-4 sm:py-2.5">
           {/* Active Hero Name & Lives */}
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2 border-r border-slate-200 pr-3">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <div className="flex items-center gap-1.5 border-r border-slate-200 pr-2 sm:gap-2 sm:pr-3">
               <img
                 src={activeHero === '2' ? sprites.hero_2?.dataUrl : sprites.hero_run_1?.dataUrl}
                 alt={activeRunnerLabel}
-                className="h-7 w-7 rounded object-contain"
+                className="h-6 w-6 rounded object-contain sm:h-7 sm:w-7"
               />
               {activeNameSprite?.isCustom ? (
                 <img
                   src={activeNameSprite.dataUrl}
                   alt={activeRunnerLabel}
-                  className="h-6 max-w-[140px] object-contain"
+                  className="h-5 max-w-[78px] object-contain sm:h-6 sm:max-w-[140px]"
                 />
               ) : (
-                <span className="max-w-[160px] truncate text-xs font-semibold text-slate-800">
+                <span className="max-w-[82px] truncate text-xs font-semibold text-slate-800 sm:max-w-[160px]">
                   {activeRunnerLabel}
                 </span>
               )}
             </div>
 
-            <div className="flex items-center gap-1.5" aria-label={`Vidas: ${hudLives}`}>
+            <div className="flex items-center gap-0.5 sm:gap-1.5" aria-label={`Vidas: ${hudLives}`}>
               {Array.from({ length: DIFFICULTY_CONFIG[difficulty].hearts }).map((_, i) => {
                 const alive = i < hudLives;
                 return (
@@ -984,30 +1048,32 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
                     key={i}
                     src={sprites.heart?.dataUrl}
                     alt={alive ? 'Vida' : 'Vida perdida'}
-                    className={`h-6 w-6 object-contain transition-opacity ${
+                    className={`h-4 w-4 object-contain transition-opacity sm:h-6 sm:w-6 ${
                       alive ? 'opacity-100' : 'opacity-20 grayscale'
                     }`}
                   />
                 );
               })}
               {hasShield && (
-                <span className="ml-2 text-xs font-semibold text-blue-600">· Escudo activo</span>
+                <span className="ml-1 text-[11px] font-semibold text-blue-600 sm:ml-2 sm:text-xs">
+                  · Escudo
+                </span>
               )}
             </div>
           </div>
 
           {/* Scoreboard */}
-          <div className="flex items-center gap-5 text-sm">
-            <div className="flex items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-2.5 text-xs sm:gap-5 sm:text-sm">
+            <div className="flex items-center gap-1">
               <img
                 src={sprites.collectible?.dataUrl}
                 alt="Premios"
-                className="h-5 w-5 object-contain"
+                className="h-4 w-4 object-contain sm:h-5 sm:w-5"
               />
               <span className="font-mono font-semibold text-slate-900 tabular-nums">{hudStars}</span>
             </div>
             <div className="text-slate-600">
-              Puntos:{' '}
+              <span className="hidden sm:inline">Puntos: </span>
               <span className="font-mono font-bold text-slate-900 tabular-nums">{hudScore}</span>
             </div>
             <div className="hidden text-slate-500 sm:block">
@@ -1019,207 +1085,242 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
           </div>
         </div>
 
-        {/* Interactive Canvas */}
-        <div className="relative aspect-[2/1] w-full select-none bg-sky-50">
+        {/* Interactive Canvas Stage */}
+        <div ref={stageRef} className="relative min-h-0 w-full flex-1 select-none overflow-hidden bg-sky-50">
           <canvas
             ref={canvasRef}
-            width={CANVAS_W}
-            height={CANVAS_H}
             onPointerDown={(e) => {
               e.preventDefault();
               if (gameState === 'PLAYING') triggerJump();
             }}
-            className="h-full w-full cursor-pointer touch-none block"
+            className="block h-full w-full cursor-pointer touch-none"
           />
 
           {/* Title Menu Overlay */}
           {gameState === 'TITLE_MENU' && (
-            <div className="absolute inset-0 flex items-center justify-center overflow-y-auto bg-slate-900/35 p-3 backdrop-blur-[2px]">
-              <div className="relative my-auto w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 text-center shadow-xl">
+            <div className="absolute inset-0 flex items-center justify-center overflow-hidden bg-slate-900/35 p-2 backdrop-blur-[2px] sm:p-4">
+              <div className="relative flex w-full max-w-md flex-col rounded-2xl border border-slate-200 bg-white p-3 text-center shadow-xl sm:max-w-lg sm:p-5 [@media(max-height:480px)]:max-w-2xl [@media(max-height:480px)]:grid [@media(max-height:480px)]:grid-cols-2 [@media(max-height:480px)]:items-center [@media(max-height:480px)]:gap-3 [@media(max-height:480px)]:p-3">
                 {/* Cover Title & Decorative Elements */}
-                <div className="mb-2 flex items-center justify-center gap-3">
-                  {sprites.cover_decor_1?.isCustom ? (
-                    <img
-                      src={sprites.cover_decor_1.dataUrl}
-                      alt="Decoración de portada 1"
-                      className="h-12 w-12 object-contain shrink-0"
-                    />
-                  ) : null}
-
-                  <div className="min-w-0 flex-1">
-                    {sprites.cover?.isCustom ? (
+                <div className="[@media(max-height:480px)]:flex [@media(max-height:480px)]:flex-col [@media(max-height:480px)]:justify-center">
+                  <div className="mb-1.5 flex items-center justify-center gap-2 sm:mb-2 sm:gap-3">
+                    {sprites.cover_decor_1?.isCustom ? (
                       <img
-                        src={sprites.cover.dataUrl}
-                        alt={gameTitle}
-                        className="mx-auto mb-1 max-h-16 object-contain"
+                        src={sprites.cover_decor_1.dataUrl}
+                        alt="Decoración de portada 1"
+                        className="h-9 w-9 shrink-0 object-contain sm:h-12 sm:w-12"
                       />
                     ) : null}
-                    <input
-                      type="text"
-                      value={gameTitle}
-                      onChange={(e) => onChangeTitle(e.target.value)}
-                      maxLength={40}
-                      placeholder="Las aventuras de Teo&Benja"
-                      aria-label="Nombre del juego"
-                      className="font-hand w-full rounded-lg border border-transparent bg-transparent py-0.5 text-center text-2xl leading-snug text-slate-900 transition-colors hover:border-slate-200 focus:border-blue-500 focus:bg-slate-50 focus:outline-none sm:text-[26px]"
-                    />
+
+                    <div className="min-w-0 flex-1">
+                      {sprites.cover?.isCustom ? (
+                        <img
+                          src={sprites.cover.dataUrl}
+                          alt={gameTitle}
+                          className="mx-auto mb-0.5 max-h-11 object-contain sm:mb-1 sm:max-h-16 [@media(max-height:480px)]:max-h-10"
+                        />
+                      ) : null}
+                      <h2 className="font-hand text-center text-xl leading-tight text-slate-900 sm:py-0.5 sm:text-[26px] [@media(max-height:480px)]:text-lg">
+                        {gameTitle}
+                      </h2>
+                    </div>
+
+                    {sprites.cover_decor_2?.isCustom ? (
+                      <img
+                        src={sprites.cover_decor_2.dataUrl}
+                        alt="Decoración de portada 2"
+                        className="h-9 w-9 shrink-0 object-contain sm:h-12 sm:w-12"
+                      />
+                    ) : null}
                   </div>
 
-                  {sprites.cover_decor_2?.isCustom ? (
+                  {sprites.cover_decor_3?.isCustom ? (
                     <img
-                      src={sprites.cover_decor_2.dataUrl}
-                      alt="Decoración de portada 2"
-                      className="h-12 w-12 object-contain shrink-0"
+                      src={sprites.cover_decor_3.dataUrl}
+                      alt="Decoración de portada 3"
+                      className="mx-auto mb-1.5 h-7 object-contain sm:mb-2 sm:h-9 [@media(max-height:480px)]:hidden"
                     />
                   ) : null}
+
+                  {/* Desktop / Short-landscape difficulty + CTA placement */}
+                  <div className="hidden [@media(max-height:480px)]:block">
+                    <div className="mb-2 grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1">
+                      {(['gentle', 'normal', 'brisk'] as const).map((mode) => {
+                        const active = difficulty === mode;
+                        return (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => onChangeDifficulty(mode)}
+                            className={`rounded-md px-1.5 py-1 text-[11px] font-semibold transition-colors ${
+                              active
+                                ? 'bg-white text-slate-900 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {DIFFICULTY_CONFIG[mode].label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={startGame}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-blue-700"
+                    >
+                      <Play className="h-4 w-4 fill-current" />
+                      ¡Empezar a jugar!
+                    </button>
+                  </div>
                 </div>
 
-                {sprites.cover_decor_3?.isCustom ? (
-                  <img
-                    src={sprites.cover_decor_3.dataUrl}
-                    alt="Decoración de portada 3"
-                    className="mx-auto mb-2 h-9 object-contain"
-                  />
-                ) : null}
+                <div>
+                  <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500 sm:mb-2 sm:text-xs">
+                    Escoge a tu héroe
+                  </p>
 
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Escoge a tu héroe
-                </p>
-
-                {/* 2 Visual Hero Selection Cards */}
-                <div className="mb-3.5 grid grid-cols-2 gap-3">
-                  {/* Hero 1 Card */}
-                  <button
-                    type="button"
-                    onClick={() => onChangeActiveHero('1')}
-                    className={`group relative flex flex-col items-center rounded-xl border-2 p-2.5 transition-all ${
-                      activeHero === '1'
-                        ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-200'
-                        : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/60'
-                    }`}
-                  >
-                    <div className="mb-1.5 flex h-16 w-full items-center justify-center">
-                      <img
-                        src={sprites[hero1PreviewSlot]?.dataUrl}
-                        alt={cleanHero1}
-                        className="max-h-full max-w-full object-contain"
-                      />
-                    </div>
-                    <div className="flex h-8 w-full items-center justify-center">
-                      {sprites.cover_hero_1_name?.isCustom ? (
+                  {/* 2 Visual Hero Selection Cards */}
+                  <div className="mb-2.5 grid grid-cols-2 gap-2 sm:mb-3.5 sm:gap-3 [@media(max-height:480px)]:mb-0">
+                    {/* Hero 1 Card */}
+                    <button
+                      type="button"
+                      onClick={() => onChangeActiveHero('1')}
+                      className={`group relative flex flex-col items-center rounded-xl border-2 p-2 transition-all sm:p-2.5 ${
+                        activeHero === '1'
+                          ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-200'
+                          : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/60'
+                      }`}
+                    >
+                      <div className="mb-1 flex h-12 w-full items-center justify-center sm:mb-1.5 sm:h-16 [@media(max-height:480px)]:h-10">
                         <img
-                          src={sprites.cover_hero_1_name.dataUrl}
+                          src={sprites[hero1PreviewSlot]?.dataUrl}
                           alt={cleanHero1}
                           className="max-h-full max-w-full object-contain"
                         />
-                      ) : (
-                        <span className="truncate text-sm font-bold text-slate-900">{cleanHero1}</span>
-                      )}
-                    </div>
-                    <span
-                      className={`mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold ${
-                        activeHero === '1' ? 'text-blue-700' : 'text-slate-400'
+                      </div>
+                      <div className="flex h-6 w-full items-center justify-center sm:h-8">
+                        {sprites.cover_hero_1_name?.isCustom ? (
+                          <img
+                            src={sprites.cover_hero_1_name.dataUrl}
+                            alt={cleanHero1}
+                            className="max-h-full max-w-full object-contain"
+                          />
+                        ) : (
+                          <span className="truncate text-xs font-bold text-slate-900 sm:text-sm">
+                            {cleanHero1}
+                          </span>
+                        )}
+                      </div>
+                      <span
+                        className={`mt-1 inline-flex items-center gap-1 text-[10px] font-semibold sm:mt-1.5 sm:text-[11px] ${
+                          activeHero === '1' ? 'text-blue-700' : 'text-slate-400'
+                        }`}
+                      >
+                        {activeHero === '1' ? (
+                          <>
+                            <Check className="h-3 w-3 sm:h-3.5 sm:w-3.5" />
+                            Elegido
+                          </>
+                        ) : (
+                          'Tocar para elegir'
+                        )}
+                      </span>
+                    </button>
+
+                    {/* Hero 2 Card */}
+                    <button
+                      type="button"
+                      onClick={() => onChangeActiveHero('2')}
+                      className={`group relative flex flex-col items-center rounded-xl border-2 p-2 transition-all sm:p-2.5 ${
+                        activeHero === '2'
+                          ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-200'
+                          : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/60'
                       }`}
                     >
-                      {activeHero === '1' ? (
-                        <>
-                          <Check className="h-3.5 w-3.5" />
-                          Elegido
-                        </>
-                      ) : (
-                        'Tocar para elegir'
-                      )}
-                    </span>
-                  </button>
-
-                  {/* Hero 2 Card */}
-                  <button
-                    type="button"
-                    onClick={() => onChangeActiveHero('2')}
-                    className={`group relative flex flex-col items-center rounded-xl border-2 p-2.5 transition-all ${
-                      activeHero === '2'
-                        ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-200'
-                        : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/60'
-                    }`}
-                  >
-                    <div className="mb-1.5 flex h-16 w-full items-center justify-center">
-                      <img
-                        src={sprites.hero_2?.dataUrl}
-                        alt={cleanHero2}
-                        className="max-h-full max-w-full object-contain"
-                      />
-                    </div>
-                    <div className="flex h-8 w-full items-center justify-center">
-                      {sprites.cover_hero_2_name?.isCustom ? (
+                      <div className="mb-1 flex h-12 w-full items-center justify-center sm:mb-1.5 sm:h-16 [@media(max-height:480px)]:h-10">
                         <img
-                          src={sprites.cover_hero_2_name.dataUrl}
+                          src={sprites.hero_2?.dataUrl}
                           alt={cleanHero2}
                           className="max-h-full max-w-full object-contain"
                         />
-                      ) : (
-                        <span className="truncate text-sm font-bold text-slate-900">{cleanHero2}</span>
-                      )}
-                    </div>
-                    <span
-                      className={`mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold ${
-                        activeHero === '2' ? 'text-blue-700' : 'text-slate-400'
-                      }`}
-                    >
-                      {activeHero === '2' ? (
-                        <>
-                          <Check className="h-3.5 w-3.5" />
-                          Elegido
-                        </>
-                      ) : (
-                        'Tocar para elegir'
-                      )}
-                    </span>
-                  </button>
-                </div>
-
-                {/* Difficulty Selector */}
-                <div className="mb-4 grid grid-cols-3 gap-1.5 rounded-lg bg-slate-100 p-1">
-                  {(['gentle', 'normal', 'brisk'] as const).map((mode) => {
-                    const active = difficulty === mode;
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        onClick={() => onChangeDifficulty(mode)}
-                        className={`rounded-md px-2 py-1.5 text-xs font-semibold transition-colors ${
-                          active
-                            ? 'bg-white text-slate-900 shadow-sm'
-                            : 'text-slate-600 hover:text-slate-900'
+                      </div>
+                      <div className="flex h-6 w-full items-center justify-center sm:h-8">
+                        {sprites.cover_hero_2_name?.isCustom ? (
+                          <img
+                            src={sprites.cover_hero_2_name.dataUrl}
+                            alt={cleanHero2}
+                            className="max-h-full max-w-full object-contain"
+                          />
+                        ) : (
+                          <span className="truncate text-xs font-bold text-slate-900 sm:text-sm">
+                            {cleanHero2}
+                          </span>
+                        )}
+                      </div>
+                      <span
+                        className={`mt-1 inline-flex items-center gap-1 text-[10px] font-semibold sm:mt-1.5 sm:text-[11px] ${
+                          activeHero === '2' ? 'text-blue-700' : 'text-slate-400'
                         }`}
                       >
-                        {DIFFICULTY_CONFIG[mode].label}
-                      </button>
-                    );
-                  })}
+                        {activeHero === '2' ? (
+                          <>
+                            <Check className="h-3 w-3 sm:h-3.5 sm:w-3.5" />
+                            Elegido
+                          </>
+                        ) : (
+                          'Tocar para elegir'
+                        )}
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* Portrait & Desktop Difficulty + CTA */}
+                  <div className="[@media(max-height:480px)]:hidden">
+                    <div className="mb-2.5 grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1 sm:mb-3.5 sm:gap-1.5">
+                      {(['gentle', 'normal', 'brisk'] as const).map((mode) => {
+                        const active = difficulty === mode;
+                        return (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => onChangeDifficulty(mode)}
+                            className={`rounded-md px-1.5 py-1.5 text-[11px] font-semibold transition-colors sm:px-2 sm:text-xs ${
+                              active
+                                ? 'bg-white text-slate-900 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {DIFFICULTY_CONFIG[mode].label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={startGame}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-blue-700 sm:px-6 sm:text-base"
+                    >
+                      <Play className="h-4 w-4 fill-current sm:h-5 sm:w-5" />
+                      ¡Empezar a jugar!
+                    </button>
+
+                    <p className="mt-2 text-[11px] text-slate-500 sm:mt-2.5 sm:text-xs">
+                      Toca la pantalla o presiona <strong>Espacio</strong> para saltar y hacer doble salto.
+                    </p>
+                  </div>
                 </div>
-
-                <button
-                  type="button"
-                  onClick={startGame}
-                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-base font-bold text-white transition-colors hover:bg-blue-700"
-                >
-                  <Play className="h-5 w-5 fill-current" />
-                  ¡Empezar a jugar!
-                </button>
-
-                <p className="mt-2.5 text-xs text-slate-500">
-                  Controles: toca la pantalla, haz clic o presiona <strong>Espacio</strong> para saltar y hacer doble salto.
-                </p>
               </div>
             </div>
           )}
 
           {/* Pause Overlay */}
           {gameState === 'PAUSED' && (
-            <div className="absolute inset-0 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]">
-              <div className="w-full max-w-xs rounded-2xl border border-slate-200 bg-white p-6 text-center shadow-xl">
-                <h2 className="mb-4 font-display text-xl font-bold text-slate-900">Juego en pausa</h2>
-                <div className="flex flex-col gap-2.5">
+            <div className="absolute inset-0 flex items-center justify-center overflow-hidden bg-slate-900/45 p-3 backdrop-blur-[2px]">
+              <div className="w-full max-w-xs rounded-2xl border border-slate-200 bg-white p-4 text-center shadow-xl sm:p-6">
+                <h2 className="mb-3 font-display text-lg font-bold text-slate-900 sm:mb-4 sm:text-xl">
+                  Juego en pausa
+                </h2>
+                <div className="flex flex-col gap-2 sm:gap-2.5">
                   <button
                     type="button"
                     onClick={() => setGameState('PLAYING')}
@@ -1243,55 +1344,55 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
 
           {/* Game Over Overlay */}
           {gameState === 'GAME_OVER' && (
-            <div className="absolute inset-0 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-[2px]">
-              <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 text-center shadow-xl">
+            <div className="absolute inset-0 flex items-center justify-center overflow-hidden bg-slate-900/45 p-3 backdrop-blur-[2px]">
+              <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-4 text-center shadow-xl sm:p-6 [@media(max-height:440px)]:max-w-md [@media(max-height:440px)]:p-3">
                 {activeNameSprite?.isCustom ? (
-                  <div className="mb-2 flex flex-col items-center gap-1">
+                  <div className="mb-1.5 flex flex-col items-center gap-1 sm:mb-2">
                     <img
                       src={activeHero === '2' ? sprites.hero_2?.dataUrl : sprites.hero_run_1?.dataUrl}
                       alt={activeRunnerLabel}
-                      className="h-12 w-12 object-contain"
+                      className="h-10 w-10 object-contain sm:h-12 sm:w-12 [@media(max-height:440px)]:hidden"
                     />
                     <img
                       src={activeNameSprite.dataUrl}
                       alt={activeRunnerLabel}
-                      className="h-8 max-w-[200px] object-contain"
+                      className="h-6 max-w-[170px] object-contain sm:h-8 sm:max-w-[200px]"
                     />
-                    <h2 className="font-display text-xl font-bold text-slate-900">
+                    <h2 className="font-display text-lg font-bold text-slate-900 sm:text-xl">
                       {isNewRecord ? '¡Nuevo récord!' : '¡Gran aventura!'}
                     </h2>
                   </div>
                 ) : (
-                  <h2 className="font-display text-2xl font-bold text-slate-900">
+                  <h2 className="font-display text-xl font-bold text-slate-900 sm:text-2xl">
                     {isNewRecord ? `¡Nuevo récord, ${activeRunnerLabel}!` : `¡Gran aventura, ${activeRunnerLabel}!`}
                   </h2>
                 )}
-                <p className="mt-1 text-sm text-slate-600">
+                <p className="mt-0.5 text-xs text-slate-600 sm:mt-1 sm:text-sm [@media(max-height:440px)]:hidden">
                   {isNewRecord
                     ? 'Superaste tu mejor puntaje anterior.'
                     : '¿Listo para intentarlo otra vez?'}
                 </p>
 
-                <div className="my-5 grid grid-cols-2 gap-3 rounded-xl bg-slate-50 p-4">
+                <div className="my-3 grid grid-cols-2 gap-2.5 rounded-xl bg-slate-50 p-3 sm:my-5 sm:gap-3 sm:p-4 [@media(max-height:440px)]:my-2 [@media(max-height:440px)]:p-2">
                   <div>
-                    <div className="text-xs text-slate-500">Puntos totales</div>
-                    <div className="mt-0.5 font-mono text-2xl font-bold text-slate-900 tabular-nums">
+                    <div className="text-[11px] text-slate-500 sm:text-xs">Puntos totales</div>
+                    <div className="mt-0.5 font-mono text-xl font-bold text-slate-900 tabular-nums sm:text-2xl">
                       {hudScore}
                     </div>
                   </div>
                   <div>
-                    <div className="text-xs text-slate-500">Premios recogidos</div>
-                    <div className="mt-0.5 font-mono text-2xl font-bold text-amber-600 tabular-nums">
+                    <div className="text-[11px] text-slate-500 sm:text-xs">Premios recogidos</div>
+                    <div className="mt-0.5 font-mono text-xl font-bold text-amber-600 tabular-nums sm:text-2xl">
                       {hudStars}
                     </div>
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-1.5 sm:gap-2">
                   <button
                     type="button"
                     onClick={startGame}
-                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-blue-700"
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-blue-700 sm:py-3"
                   >
                     <RotateCcw className="h-4 w-4" />
                     Jugar otra vez
@@ -1299,7 +1400,7 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
                   <button
                     type="button"
                     onClick={() => setGameState('TITLE_MENU')}
-                    className="rounded-lg px-4 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100"
+                    className="rounded-lg px-4 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 sm:py-2"
                   >
                     Cambiar héroe o dificultad
                   </button>
@@ -1310,8 +1411,8 @@ export const RunnerGameCanvas: React.FC<RunnerGameCanvasProps> = ({
         </div>
       </div>
 
-      {/* Gentle bottom instructions strip */}
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+      {/* Gentle bottom instructions strip (desktop/tablet) */}
+      <div className="mt-2 hidden shrink-0 items-center justify-between gap-2 text-xs text-slate-500 sm:flex">
         <span>
           <strong>Salto:</strong> clic, tocar pantalla o tecla Espacio · Presiona dos veces en el aire para doble salto.
         </span>
